@@ -8,7 +8,7 @@ Large files are intentionally not included. Keep datasets, trained checkpoints, 
 
 ```text
 .
-├── src/backdoor_ce/        # reusable implementation modules
+├── src/                    # reusable implementation modules
 ├── experiments/            # executable experiment runners
 ├── requirements.txt        # Python dependencies
 ├── .gitignore              # ignored datasets, checkpoints, outputs, and caches
