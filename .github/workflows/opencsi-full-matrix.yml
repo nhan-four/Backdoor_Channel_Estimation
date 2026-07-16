@@ -1,0 +1,260 @@
+name: OpenCSI full 72-run matrix
+
+on:
+  pull_request:
+    paths:
+      - ".github/opencsi-full-run.trigger"
+      - ".github/workflows/opencsi-full-matrix.yml"
+      - "experiments/opencsi_measured_backdoor.py"
+      - "experiments/apply_opencsi_v8_hotfix.py"
+      - "tests/test_opencsi_measured_backdoor.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: "29503567022"
+  SOURCE_ARTIFACT: "opencsi-compact-v8-measured"
+  DATASET_SHA256: "74521a00be868ba3bd92a5540536fa8600eb770d5459bd7c0191800001031f50"
+  MANIFEST_SHA256: "6bda855635ee52ffa12b025f4b3e62689ee0abf546c707e2a32f6295f867ed3b"
+  PATCHED_SOURCE_SHA256: "4fb5cf784f8557dd8adf49c3ba15432dd87f7d0816cb6b5103d4a10ee695228f"
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install preflight dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas scipy tables pytest
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Apply audited source correction and test
+        run: |
+          set -euo pipefail
+          python experiments/apply_opencsi_v8_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          pytest -q tests/test_opencsi_measured_backdoor.py
+          printf '%s  %s\n' "$PATCHED_SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
+          sha256sum experiments/opencsi_measured_backdoor.py > patched_source.sha256
+
+      - name: Upload frozen source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-full-source-preflight
+          path: |
+            experiments/opencsi_measured_backdoor.py
+            experiments/apply_opencsi_v8_hotfix.py
+            tests/test_opencsi_measured_backdoor.py
+            patched_source.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  matrix:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        fold: [0, 1, 2, 3]
+        seed: [42, 43, 44]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install experiment dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas scipy tables
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Freeze and verify experiment source
+        run: |
+          set -euo pipefail
+          python experiments/apply_opencsi_v8_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          printf '%s  %s\n' "$PATCHED_SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
+          sha256sum experiments/opencsi_measured_backdoor.py > patched_source.sha256
+
+      - name: Download checksum-pinned compact measured dataset
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.SOURCE_ARTIFACT }}
+          path: inputs
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Verify compact dataset and preparation manifest
+        run: |
+          set -euo pipefail
+          DATASET=inputs/measured_smoke/data/opencsi_compact_v8.npz
+          MANIFEST=inputs/measured_smoke/data/opencsi_compact_v8.manifest.json
+          test -f "$DATASET"
+          test -f "$MANIFEST"
+          printf '%s  %s\n' "$DATASET_SHA256" "$DATASET" | sha256sum --check --strict
+          printf '%s  %s\n' "$MANIFEST_SHA256" "$MANIFEST" | sha256sum --check --strict
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('inputs/measured_smoke/data/opencsi_compact_v8.manifest.json')
+          m = json.loads(p.read_text(encoding='utf-8'))
+          assert m['source']['doi'] == '10.6084/m9.figshare.19596379.v1'
+          assert m['source']['archive_md5'] == '7d83f1682d05fa230bba3e90f755c580'
+          assert m['audit']['eligible_fingerprint_count'] == 3974
+          assert m['audit']['observation_count_total'] == 63584
+          assert len(m['folds']) == 4
+          assert m['paper_eligible'] is False
+          print(json.dumps({'dataset_manifest_gate': 'pass', 'eligible_fingerprints': 3974, 'observations': 63584}, sort_keys=True))
+          PY
+
+      - name: Run registered fold-seed experiment
+        run: |
+          set -euo pipefail
+          OUT=matrix_results/fold${{ matrix.fold }}_seed${{ matrix.seed }}
+          python experiments/opencsi_measured_backdoor.py run \
+            --dataset inputs/measured_smoke/data/opencsi_compact_v8.npz \
+            --fold ${{ matrix.fold }} \
+            --seed ${{ matrix.seed }} \
+            --output "$OUT" \
+            --device cpu \
+            --width 24 \
+            --blocks 3 \
+            --clean-epochs 8 \
+            --attack-epochs 6 \
+            --batch-size 512 \
+            --clean-lr 1e-3 \
+            --attack-lr 2e-5 \
+            --poison-rate 0.10 \
+            --clean-budget-fraction 0.10 \
+            --additive-evm-db -20.0 \
+            --target-scale 0.15 \
+            --bootstrap-draws 2000
+
+      - name: Validate six-row fold-seed output
+        run: |
+          python - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+          fold = int('${{ matrix.fold }}')
+          seed = int('${{ matrix.seed }}')
+          root = Path(f'matrix_results/fold{fold}_seed{seed}')
+          rows = list(csv.DictReader((root / 'summary.csv').open(newline='', encoding='utf-8')))
+          manifest = json.loads((root / 'run_manifest.json').read_text(encoding='utf-8'))
+          expected = {
+              (a, t)
+              for a in ('direct', 'residual')
+              for t in ('frequency_tone', 'phase_band', 'multiplicative')
+          }
+          observed = {(r['architecture'], r['trigger']) for r in rows}
+          assert len(rows) == 6, len(rows)
+          assert observed == expected, (observed, expected)
+          assert all(r['status'] == 'ok' for r in rows)
+          assert all(int(r['fold']) == fold and int(r['seed']) == seed for r in rows)
+          assert manifest['paper_eligible'] is True
+          assert manifest['row_count'] == 6
+          print(json.dumps({'fold': fold, 'seed': seed, 'rows': len(rows), 'gate': 'pass'}, sort_keys=True))
+          PY
+
+      - name: Upload fold-seed result and checkpoints
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-full-fold${{ matrix.fold }}-seed${{ matrix.seed }}
+          path: |
+            matrix_results/fold${{ matrix.fold }}_seed${{ matrix.seed }}/
+            patched_source.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+  collect:
+    needs: matrix
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install collector dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas tables
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Freeze collector source
+        run: |
+          set -euo pipefail
+          python experiments/apply_opencsi_v8_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          printf '%s  %s\n' "$PATCHED_SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
+
+      - name: Download all fold-seed artifacts
+        id: download_matrix
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: opencsi-full-fold*-seed*
+          path: downloaded_matrix
+          merge-multiple: false
+
+      - name: Collect and enforce the 72-row paper gate
+        id: collector
+        shell: bash
+        run: |
+          set +e
+          mkdir -p collected
+          find downloaded_matrix -maxdepth 5 -type f -printf '%p %s bytes\n' | sort > collected/downloaded_inventory.txt 2>&1
+          python experiments/opencsi_measured_backdoor.py collect \
+            --input-root downloaded_matrix \
+            --output collected 2>&1 | tee collected/collector.log
+          rc=${PIPESTATUS[0]}
+          python - <<PY
+          import json
+          from pathlib import Path
+          payload = {
+              'matrix_job_result': '${{ needs.matrix.result }}',
+              'download_step_outcome': '${{ steps.download_matrix.outcome }}',
+              'collector_exit_code': int('$rc'),
+              'paper_eligible': int('$rc') == 0 and '${{ needs.matrix.result }}' == 'success',
+          }
+          Path('collected/full_matrix_status.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
+          exit "$rc"
+
+      - name: Upload full collection and audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-full-72run-collection
+          path: |
+            collected/
+            experiments/opencsi_measured_backdoor.py
+            experiments/apply_opencsi_v8_hotfix.py
+          if-no-files-found: warn
+          retention-days: 30
