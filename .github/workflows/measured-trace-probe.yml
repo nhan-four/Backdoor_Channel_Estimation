@@ -5,6 +5,12 @@ on:
     paths:
       - ".github/workflows/measured-trace-probe.yml"
       - "experiments/probe_measured_archive.py"
+      - ".github/measured-trace-probe.trigger"
+  pull_request:
+    paths:
+      - ".github/workflows/measured-trace-probe.yml"
+      - "experiments/probe_measured_archive.py"
+      - ".github/measured-trace-probe.trigger"
   workflow_dispatch:
 
 permissions:
@@ -86,7 +92,7 @@ jobs:
                       )
                       time.sleep(sleep_seconds)
                       delay = min(delay * 2, 60)
-                  except Exception as exc:  # network retry boundary
+                  except Exception as exc:
                       last_error = exc
                       print(f"Attempt {attempt}: {type(exc).__name__}: {exc}")
                       time.sleep(delay)
