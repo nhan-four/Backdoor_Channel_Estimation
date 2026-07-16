@@ -1,0 +1,49 @@
+name: Zenodo endpoint diagnostic
+
+on:
+  pull_request:
+    paths:
+      - ".github/measured-trace-probe.trigger"
+      - ".github/workflows/zenodo-endpoint-diagnostic.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe official endpoints without downloading bodies
+        shell: bash
+        run: |
+          set +e
+          urls=(
+            "https://zenodo.org/records/20609873"
+            "https://zenodo.org/api/records/20609873"
+            "https://zenodo.org/records/20609873/files/4.85GHz%20Dataset.zip?download=1"
+            "https://zenodo.org/api/records/20609873/files/4.85GHz%20Dataset.zip/content"
+            "https://zenodo.org/records/20494792"
+            "https://zenodo.org/api/records/20494792"
+            "https://zenodo.org/records/20494792/files/4.85GHz%20Dataset.zip?download=1"
+            "https://zenodo.org/api/records/20494792/files/4.85GHz%20Dataset.zip/content"
+            "https://zenodo.org/api/records/20494792/files-archive"
+          )
+          for url in "${urls[@]}"; do
+            echo "=== URL: $url"
+            curl \
+              --silent --show-error \
+              --location \
+              --head \
+              --max-redirs 5 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --user-agent "WCL2026-1744-endpoint-diagnostic/1.0" \
+              --write-out 'FINAL_HTTP=%{http_code} FINAL_URL=%{url_effective} CONTENT_TYPE=%{content_type}\n' \
+              "$url" \
+              | grep -Ei '^(HTTP/|location:|content-type:|content-length:|retry-after:|x-ratelimit-|FINAL_HTTP=)' \
+              | tr -d '\r'
+            echo
+          done
+          exit 0
