@@ -1,0 +1,55 @@
+name: Discover author-provided measured dataset links
+
+on:
+  pull_request:
+    paths:
+      - ".github/measured-trace-probe.trigger"
+      - ".github/workflows/discover-measured-dataset-links.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download arXiv source bundles and extract external URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p discovered
+          papers=(
+            "2104.07963_opencsi"
+            "2408.16377_espargos"
+            "2211.05527_mamimo"
+            "2206.15302_dichasus"
+          )
+          for entry in "${papers[@]}"; do
+            id="${entry%%_*}"
+            name="${entry#*_}"
+            dir="discovered/$name"
+            mkdir -p "$dir/src"
+            echo "=== $id $name ==="
+            curl --fail --location --retry 5 --retry-all-errors \
+              --connect-timeout 20 --max-time 180 \
+              --user-agent "WCL2026-1744-reproducibility-link-discovery/1.0" \
+              --output "$dir/source.tar" \
+              "https://export.arxiv.org/e-print/$id"
+            tar -xf "$dir/source.tar" -C "$dir/src" || true
+            grep -RhoE 'https?://[^][{}<>"[:space:]\\]+' "$dir/src" \
+              | sed 's/[),.;]*$//' \
+              | sort -u > "$dir/urls.txt" || true
+            grep -RniE 'dataset|data set|data repository|download|available at|github|zenodo|darus|figshare|kaggle|dataverse' "$dir/src" \
+              > "$dir/context.txt" || true
+            cat "$dir/urls.txt"
+          done
+
+      - name: Upload link-discovery artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: measured-dataset-author-link-discovery
+          path: discovered/
+          if-no-files-found: error
+          retention-days: 30
