@@ -98,7 +98,7 @@ jobs:
               nrows = int(x_table.nrows)
               for start in range(0, nrows, chunk):
                   stop = min(start + chunk, nrows)
-                  taps = x_table.cols.values_block_0[start:stop, 0]
+                  taps = x_table.cols.values_block_0[start:stop][:, 0]
                   ids = x_table.cols.values_block_2[start:stop]
                   fingerprint_ids = ids[:, 0]
                   snapshot_ids = ids[:, 1]
