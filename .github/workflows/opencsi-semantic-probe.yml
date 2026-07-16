@@ -39,7 +39,7 @@ jobs:
 
           import csv
           import json
-          from collections import Counter, defaultdict
+          from collections import Counter
           from pathlib import Path
 
           import numpy as np
@@ -60,9 +60,7 @@ jobs:
               y_storer = store.get_storer("y")
               report["X_nrows"] = int(x_storer.nrows)
               report["y_nrows"] = int(y_storer.nrows)
-              report["rows_per_snapshot_exact"] = (
-                  int(x_storer.nrows) / int(y_storer.nrows)
-              )
+              report["rows_per_snapshot_exact"] = int(x_storer.nrows) / int(y_storer.nrows)
               report["X_data_columns"] = list(x_storer.data_columns)
               report["y_data_columns"] = list(y_storer.data_columns)
 
@@ -70,7 +68,6 @@ jobs:
               x_tail = store.select("X", start=max(0, x_storer.nrows - 120), stop=x_storer.nrows)
               y_head = store.select("y", start=0, stop=120)
               y_tail = store.select("y", start=max(0, y_storer.nrows - 120), stop=y_storer.nrows)
-
               x_head.to_csv(out / "X_head.csv")
               x_tail.to_csv(out / "X_tail.csv")
               y_head.to_csv(out / "y_head.csv")
@@ -83,8 +80,6 @@ jobs:
               report["X_head_index"] = [int(v) for v in x_head.index[:20]]
               report["y_head_index"] = [int(v) for v in y_head.index[:20]]
 
-          # Stream only identity columns from the underlying PyTables table.
-          # This avoids materializing the 56.9M-row measurement table.
           fingerprint_counts = Counter()
           snapshot_counts = Counter()
           tap_counts = Counter()
@@ -103,10 +98,8 @@ jobs:
               nrows = int(x_table.nrows)
               for start in range(0, nrows, chunk):
                   stop = min(start + chunk, nrows)
-                  rec = x_table.read(start, stop, field=["index", "values_block_0", "values_block_2"])
-                  indices = rec["index"]
-                  taps = rec["values_block_0"][:, 0]
-                  ids = rec["values_block_2"]
+                  taps = x_table.cols.values_block_0[start:stop, 0]
+                  ids = x_table.cols.values_block_2[start:stop]
                   fingerprint_ids = ids[:, 0]
                   snapshot_ids = ids[:, 1]
 
@@ -117,7 +110,6 @@ jobs:
                   unique_tap, tap_n = np.unique(taps, return_counts=True)
                   tap_counts.update({int(k): int(v) for k, v in zip(unique_tap, tap_n)})
 
-                  # Pair boundaries are cheap because rows are expected to be grouped.
                   pair_matrix = np.stack([fingerprint_ids, snapshot_ids], axis=1)
                   changes = np.ones(len(pair_matrix), dtype=bool)
                   if len(pair_matrix) > 1:
@@ -126,16 +118,16 @@ jobs:
                   ends = np.r_[starts[1:], len(pair_matrix)]
                   for local_start, local_end in zip(starts, ends):
                       pair = (int(pair_matrix[local_start, 0]), int(pair_matrix[local_start, 1]))
-                      count = int(local_end - local_start)
-                      if local_start == 0 and previous_pair == pair:
-                          pair_row_counts[pair] += count
-                      else:
-                          pair_row_counts[pair] += count
+                      pair_row_counts[pair] += int(local_end - local_start)
                       if previous_pair is not None and pair < previous_pair:
                           monotonic_violations += 1
                       previous_pair = pair
                       if len(sampled_pairs) < 100:
-                          sampled_pairs.append({"fingerprint_id": pair[0], "snapshot_id": pair[1], "rows": count})
+                          sampled_pairs.append({
+                              "fingerprint_id": pair[0],
+                              "snapshot_id": pair[1],
+                              "rows": int(local_end - local_start),
+                          })
 
               y_index = y_table.col("index")
               y_values = y_table.col("values_block_0")
@@ -146,7 +138,6 @@ jobs:
               report["y_xy_max"] = [float(v) for v in np.nanmax(y_values, axis=0)]
               report["y_xy_finite_fraction"] = float(np.isfinite(y_values).mean())
 
-          # Summaries. SNAPSHOT_ID may be local within each fingerprint; pair counts are decisive.
           pair_lengths = np.fromiter(pair_row_counts.values(), dtype=np.int64)
           fp_rows = np.fromiter(fingerprint_counts.values(), dtype=np.int64)
           snap_rows = np.fromiter(snapshot_counts.values(), dtype=np.int64)
@@ -171,7 +162,6 @@ jobs:
               "sampled_pairs": sampled_pairs,
           })
 
-          # Write compact count tables for audit.
           for filename, counter, key_name in [
               ("fingerprint_row_counts.csv", fingerprint_counts, "fingerprint_id"),
               ("snapshot_row_counts.csv", snapshot_counts, "snapshot_id"),
@@ -183,7 +173,7 @@ jobs:
                   for key, value in sorted(counter.items()):
                       writer.writerow([key, value])
 
-          Path(out / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+          (out / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
           print(json.dumps(report, indent=2, sort_keys=True))
           PY
 
