@@ -1,12 +1,12 @@
-name: OpenCSI full 72-run matrix
+name: OpenCSI full 72-run matrix v9
 
 on:
   pull_request:
     paths:
-      - ".github/opencsi-full-run.trigger"
+      - ".github/opencsi-full-run-v9.trigger"
       - ".github/workflows/opencsi-full-matrix.yml"
       - "experiments/opencsi_measured_backdoor.py"
-      - "experiments/apply_opencsi_v8_hotfix.py"
+      - "experiments/apply_opencsi_v9_hotfix.py"
       - "tests/test_opencsi_measured_backdoor.py"
   workflow_dispatch:
 
@@ -19,7 +19,7 @@ env:
   SOURCE_ARTIFACT: "opencsi-compact-v8-measured"
   DATASET_SHA256: "74521a00be868ba3bd92a5540536fa8600eb770d5459bd7c0191800001031f50"
   MANIFEST_SHA256: "6bda855635ee52ffa12b025f4b3e62689ee0abf546c707e2a32f6295f867ed3b"
-  PATCHED_SOURCE_SHA256: "4fb5cf784f8557dd8adf49c3ba15432dd87f7d0816cb6b5103d4a10ee695228f"
+  PATCHED_SOURCE_SHA256: "258e7ed1f0dc38bc22f31bc6cbddc94bb55140b8885929df9bc89a2dd130f44e"
 
 jobs:
   preflight:
@@ -39,22 +39,22 @@ jobs:
           python -m pip install numpy pandas scipy tables pytest
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Apply audited source correction and test
+      - name: Apply audited v9 source correction and test
         run: |
           set -euo pipefail
-          python experiments/apply_opencsi_v8_hotfix.py
+          python experiments/apply_opencsi_v9_hotfix.py
           python -m py_compile experiments/opencsi_measured_backdoor.py
           pytest -q tests/test_opencsi_measured_backdoor.py
           printf '%s  %s\n' "$PATCHED_SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
           sha256sum experiments/opencsi_measured_backdoor.py > patched_source.sha256
 
-      - name: Upload frozen source snapshot
+      - name: Upload frozen v9 source snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: opencsi-full-source-preflight
+          name: opencsi-full-v9-source-preflight
           path: |
             experiments/opencsi_measured_backdoor.py
-            experiments/apply_opencsi_v8_hotfix.py
+            experiments/apply_opencsi_v9_hotfix.py
             tests/test_opencsi_measured_backdoor.py
             patched_source.sha256
           if-no-files-found: error
@@ -85,10 +85,10 @@ jobs:
           python -m pip install numpy pandas scipy tables
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Freeze and verify experiment source
+      - name: Freeze and verify v9 experiment source
         run: |
           set -euo pipefail
-          python experiments/apply_opencsi_v8_hotfix.py
+          python experiments/apply_opencsi_v9_hotfix.py
           python -m py_compile experiments/opencsi_measured_backdoor.py
           printf '%s  %s\n' "$PATCHED_SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
           sha256sum experiments/opencsi_measured_backdoor.py > patched_source.sha256
@@ -153,35 +153,59 @@ jobs:
           python - <<'PY'
           import csv
           import json
+          import math
           from pathlib import Path
+
           fold = int('${{ matrix.fold }}')
           seed = int('${{ matrix.seed }}')
           root = Path(f'matrix_results/fold{fold}_seed{seed}')
           rows = list(csv.DictReader((root / 'summary.csv').open(newline='', encoding='utf-8')))
           manifest = json.loads((root / 'run_manifest.json').read_text(encoding='utf-8'))
           expected = {
-              (a, t)
-              for a in ('direct', 'residual')
-              for t in ('frequency_tone', 'phase_band', 'multiplicative')
+              (architecture, trigger)
+              for architecture in ('direct', 'residual')
+              for trigger in ('frequency_tone', 'phase_band', 'multiplicative')
           }
-          observed = {(r['architecture'], r['trigger']) for r in rows}
+          observed = {(row['architecture'], row['trigger']) for row in rows}
+          finite_fields = (
+              'clean_model_clean_mse',
+              'clean_model_triggered_mse',
+              'backdoor_model_clean_mse',
+              'backdoor_model_triggered_mse',
+              'backdoor_degradation_ratio',
+              'difference_in_differences_mse',
+          )
+          selection_values = [row['attack_checkpoint_selected'].strip().lower() for row in rows]
           assert len(rows) == 6, len(rows)
           assert observed == expected, (observed, expected)
-          assert all(r['status'] == 'ok' for r in rows)
-          assert all(int(r['fold']) == fold and int(r['seed']) == seed for r in rows)
-          assert manifest['paper_eligible'] is True
+          assert all(row['status'] == 'ok' for row in rows)
+          assert all(int(row['fold']) == fold and int(row['seed']) == seed for row in rows)
+          assert all(value in {'true', 'false'} for value in selection_values)
+          assert all(math.isfinite(float(row[field])) for row in rows for field in finite_fields)
+          selected_count = sum(value == 'true' for value in selection_values)
+          assert manifest['fold_seed_gate_pass'] is True
+          assert manifest['paper_eligible'] is False
           assert manifest['row_count'] == 6
-          print(json.dumps({'fold': fold, 'seed': seed, 'rows': len(rows), 'gate': 'pass'}, sort_keys=True))
+          assert manifest['attack_checkpoint_selected_count'] == selected_count
+          assert len(manifest['attack_checkpoint_not_selected']) == 6 - selected_count
+          print(json.dumps({
+              'fold': fold,
+              'seed': seed,
+              'rows': len(rows),
+              'attack_checkpoint_selected_count': selected_count,
+              'gate': 'pass',
+          }, sort_keys=True))
           PY
 
       - name: Upload fold-seed result and checkpoints
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: opencsi-full-fold${{ matrix.fold }}-seed${{ matrix.seed }}
+          name: opencsi-full-v9-fold${{ matrix.fold }}-seed${{ matrix.seed }}
           path: |
             matrix_results/fold${{ matrix.fold }}_seed${{ matrix.seed }}/
             patched_source.sha256
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
           compression-level: 6
 
@@ -204,19 +228,19 @@ jobs:
           python -m pip install numpy pandas tables
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Freeze collector source
+      - name: Freeze v9 collector source
         run: |
           set -euo pipefail
-          python experiments/apply_opencsi_v8_hotfix.py
+          python experiments/apply_opencsi_v9_hotfix.py
           python -m py_compile experiments/opencsi_measured_backdoor.py
           printf '%s  %s\n' "$PATCHED_SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
 
-      - name: Download all fold-seed artifacts
+      - name: Download all v9 fold-seed artifacts
         id: download_matrix
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          pattern: opencsi-full-fold*-seed*
+          pattern: opencsi-full-v9-fold*-seed*
           path: downloaded_matrix
           merge-multiple: false
 
@@ -235,6 +259,7 @@ jobs:
           import json
           from pathlib import Path
           payload = {
+              'workflow_version': 'v9',
               'matrix_job_result': '${{ needs.matrix.result }}',
               'download_step_outcome': '${{ steps.download_matrix.outcome }}',
               'collector_exit_code': int('$rc'),
@@ -247,14 +272,14 @@ jobs:
           PY
           exit "$rc"
 
-      - name: Upload full collection and audit
+      - name: Upload full v9 collection and audit
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: opencsi-full-72run-collection
+          name: opencsi-full-v9-72run-collection
           path: |
             collected/
             experiments/opencsi_measured_backdoor.py
-            experiments/apply_opencsi_v8_hotfix.py
+            experiments/apply_opencsi_v9_hotfix.py
           if-no-files-found: warn
           retention-days: 30
