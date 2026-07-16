@@ -43,7 +43,8 @@ latex_start = text.find('    lines = [r"\\begin{table}[t]"')
 latex_end = text.find('    audit = {', latex_start)
 if latex_start < 0 or latex_end < 0:
     raise SystemExit("Malformed LaTeX collector block boundaries were not found")
-new_latex = '''    lines = [
+new_latex = '''    line_break = chr(92) * 2
+    lines = [
         r"\\begin{table}[t]",
         r"\\centering",
         r"\\caption{Measurement-derived OpenCSI validation across four spatial folds and three seeds. Values are mean$\\pm$standard deviation over 12 fold--seed runs.}",
@@ -51,7 +52,7 @@ new_latex = '''    lines = [
         r"\\scriptsize",
         r"\\begin{tabular}{llccc}",
         r"\\toprule",
-        "Trigger & Estimator & Clean NMSE (dB) & Triggered NMSE (dB) & $r_{\\\\rm deg}$ " + r"\\",
+        "Trigger & Estimator & Clean NMSE (dB) & Triggered NMSE (dB) & $r_{\\\\rm deg}$ " + line_break,
         r"\\midrule",
     ]
     for row in grouped.itertuples():
@@ -61,7 +62,7 @@ new_latex = '''    lines = [
             f"{row.clean_nmse_db_mean:.2f}$\\\\pm${row.clean_nmse_db_std:.2f} & "
             f"{row.triggered_nmse_db_mean:.2f}$\\\\pm${row.triggered_nmse_db_std:.2f} & "
             f"{row.degradation_ratio_mean:.3f}$\\\\pm${row.degradation_ratio_std:.3f} "
-            + r"\\"
+            + line_break
         )
     lines.extend([r"\\bottomrule", r"\\end{tabular}", r"\\end{table}"])
     (output / "opencsi_measured_table.tex").write_text(
