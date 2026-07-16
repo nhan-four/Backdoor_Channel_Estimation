@@ -1,0 +1,114 @@
+name: OpenCSI measured-data smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/measured-trace-probe.trigger"
+      - ".github/workflows/opencsi-measured-smoke.yml"
+      - "experiments/opencsi_measured_backdoor.py"
+      - "experiments/apply_opencsi_v8_hotfix.py"
+      - "tests/test_opencsi_measured_backdoor.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measured-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install numpy pandas scipy tables torch pytest
+
+      - name: Apply audited hotfix and run unit tests
+        run: |
+          python experiments/apply_opencsi_v8_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          pytest -q tests/test_opencsi_measured_backdoor.py
+          sha256sum experiments/opencsi_measured_backdoor.py > patched_source.sha256
+
+      - name: Download and verify primary OpenCSI archive
+        env:
+          OPENCSI_URL: "https://ndownloader.figshare.com/files/34809589"
+          EXPECTED_MD5: "7d83f1682d05fa230bba3e90f755c580"
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 8 --retry-all-errors \
+            --connect-timeout 30 --max-time 2400 \
+            --user-agent "WCL2026-1744-reproducibility-download/2.0" \
+            --output openCSI.zip "$OPENCSI_URL"
+          printf '%s  %s\n' "$EXPECTED_MD5" openCSI.zip | md5sum --check --strict
+          test "$(stat -c %s openCSI.zip)" -eq 2025122091
+          unzip -q openCSI.zip data.h5
+
+      - name: Prepare leakage-audited compact measured dataset
+        run: |
+          mkdir -p measured_smoke/data
+          python experiments/opencsi_measured_backdoor.py prepare \
+            --archive openCSI.zip \
+            --h5 data.h5 \
+            --output measured_smoke/data/opencsi_compact_v8.npz \
+            --reference-count 32 \
+            --observation-count 16 \
+            --nfft 64
+
+      - name: Delete raw archive and HDF5 before artifact upload
+        run: rm -f openCSI.zip data.h5
+
+      - name: Run one real fold-seed smoke configuration
+        run: |
+          python experiments/opencsi_measured_backdoor.py run \
+            --dataset measured_smoke/data/opencsi_compact_v8.npz \
+            --fold 0 \
+            --seed 42 \
+            --output measured_smoke/result_fold0_seed42 \
+            --device cpu \
+            --width 8 \
+            --blocks 1 \
+            --clean-epochs 1 \
+            --attack-epochs 1 \
+            --batch-size 1024 \
+            --bootstrap-draws 200
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = {
+              "paper_eligible": False,
+              "reason": "Real measured-data execution smoke only; incomplete pre-registered 72-run matrix.",
+              "raw_data_uploaded": False,
+          }
+          Path("measured_smoke/SMOKE_ONLY_STATUS.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+          )
+          PY
+
+      - name: Upload compact measured dataset and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-compact-v8-measured
+          path: |
+            measured_smoke/data/
+            patched_source.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload real measured smoke results
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-measured-smoke-v8
+          path: |
+            measured_smoke/result_fold0_seed42/
+            measured_smoke/SMOKE_ONLY_STATUS.json
+            experiments/opencsi_measured_backdoor.py
+            experiments/apply_opencsi_v8_hotfix.py
+          if-no-files-found: error
+          retention-days: 30
