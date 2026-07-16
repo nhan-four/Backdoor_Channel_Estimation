@@ -1,0 +1,144 @@
+name: OpenCSI verified full-download inventory
+
+on:
+  pull_request:
+    paths:
+      - ".github/measured-trace-probe.trigger"
+      - ".github/workflows/opencsi-full-download-inventory.yml"
+      - "experiments/probe_measured_archive.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download-and-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install inventory dependencies
+        run: python -m pip install scipy h5py
+
+      - name: Download and verify OpenCSI archive
+        env:
+          OPENCSI_URL: "https://ndownloader.figshare.com/files/34809589"
+          EXPECTED_MD5: "7d83f1682d05fa230bba3e90f755c580"
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 8 --retry-all-errors \
+            --connect-timeout 30 --max-time 2400 \
+            --user-agent "WCL2026-1744-reproducibility-download/1.0" \
+            --output openCSI.zip "$OPENCSI_URL"
+          printf '%s  %s\n' "$EXPECTED_MD5" openCSI.zip | md5sum --check --strict
+          test "$(stat -c %s openCSI.zip)" -eq 2025122091
+          unzip -tq openCSI.zip
+
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          path = Path("openCSI.zip")
+          sha256 = hashlib.sha256()
+          with path.open("rb") as handle:
+              for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                  sha256.update(block)
+          metadata = {
+              "source": "Figshare",
+              "article_id": 19596379,
+              "file_id": 34809589,
+              "doi": "10.6084/m9.figshare.19596379.v1",
+              "license": "CC BY 4.0",
+              "filename": "openCSI.zip",
+              "size_bytes": path.stat().st_size,
+              "md5": "7d83f1682d05fa230bba3e90f755c580",
+              "sha256": sha256.hexdigest(),
+              "paper_eligible": False,
+              "purpose": "verified_archive_inventory_only",
+          }
+          Path("source_metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+          print(json.dumps(metadata, indent=2, sort_keys=True))
+          PY
+
+      - name: Inventory archive members
+        run: |
+          mkdir -p opencsi_inventory
+          python - <<'PY'
+          import csv
+          import json
+          import zipfile
+          from collections import Counter, defaultdict
+          from pathlib import Path, PurePosixPath
+
+          rows = []
+          with zipfile.ZipFile("openCSI.zip") as zf:
+              bad = zf.testzip()
+              if bad is not None:
+                  raise RuntimeError(f"ZIP CRC failure: {bad}")
+              for info in zf.infolist():
+                  p = PurePosixPath(info.filename)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise RuntimeError(f"Unsafe ZIP member: {info.filename}")
+                  rows.append({
+                      "path": info.filename,
+                      "is_dir": info.is_dir(),
+                      "size_bytes": info.file_size,
+                      "compressed_bytes": info.compress_size,
+                      "crc32": f"{info.CRC:08x}",
+                      "suffix": p.suffix.lower(),
+                      "top_level": p.parts[0] if p.parts else "",
+                      "depth": len(p.parts),
+                  })
+
+          with Path("opencsi_inventory/members.csv").open("w", newline="", encoding="utf-8") as handle:
+              writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+              writer.writeheader()
+              writer.writerows(rows)
+
+          suffix_count = Counter(row["suffix"] or "<none>" for row in rows)
+          suffix_size = defaultdict(int)
+          top_count = Counter(row["top_level"] for row in rows)
+          top_size = defaultdict(int)
+          for row in rows:
+              suffix_size[row["suffix"] or "<none>"] += int(row["size_bytes"])
+              top_size[row["top_level"]] += int(row["size_bytes"])
+
+          files = [row for row in rows if not row["is_dir"]]
+          summary = {
+              "member_count": len(rows),
+              "file_count": len(files),
+              "uncompressed_size_bytes": sum(int(row["size_bytes"]) for row in files),
+              "compressed_member_size_bytes": sum(int(row["compressed_bytes"]) for row in files),
+              "suffix_counts": dict(suffix_count),
+              "suffix_sizes": dict(suffix_size),
+              "top_level_counts": dict(top_count),
+              "top_level_sizes": dict(top_size),
+              "paper_eligible": False,
+          }
+          Path("opencsi_inventory/summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+          largest = sorted(files, key=lambda row: int(row["size_bytes"]), reverse=True)[:100]
+          Path("opencsi_inventory/largest_members.json").write_text(json.dumps(largest, indent=2), encoding="utf-8")
+
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          print("LARGEST MEMBERS")
+          for row in largest[:40]:
+              print(row)
+          print("FIRST MEMBERS")
+          for row in rows[:100]:
+              print(row)
+          PY
+          cp source_metadata.json opencsi_inventory/
+
+      - name: Remove raw archive
+        if: always()
+        run: rm -f openCSI.zip
+
+      - name: Upload provenance and inventory only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-verified-inventory
+          path: opencsi_inventory/
+          if-no-files-found: error
+          retention-days: 30
