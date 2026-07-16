@@ -254,6 +254,7 @@ jobs:
       - name: Assemble reproducible paper-source bundle
         if: always()
         run: |
+          set -euo pipefail
           mkdir -p paper_bundle/src paper_bundle/frozen_v9_collection
           cp experiments/audit_opencsi_v9_results.py paper_bundle/src/
           cp experiments/opencsi_measured_backdoor.py paper_bundle/src/
@@ -265,7 +266,54 @@ jobs:
           cp source_collection/collected/opencsi_measured_full_results.csv paper_bundle/frozen_v9_collection/
           cp source_collection/collected/opencsi_measured_grouped_results.csv paper_bundle/frozen_v9_collection/
           cp source_collection/collected/opencsi_measured_table.tex paper_bundle/frozen_v9_collection/
-          find paper_bundle -type f -print0 | sort -z | xargs -0 sha256sum > paper_bundle/BUNDLE_SHA256SUMS.txt
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('paper_bundle')
+          excluded = {
+              'provenance_manifest.json',
+              'BUNDLE_SHA256SUMS.txt',
+              'FINAL_PROVENANCE_MANIFEST.json',
+          }
+          manifest = {}
+          for path in sorted(p for p in root.rglob('*') if p.is_file()):
+              rel = path.relative_to(root).as_posix()
+              if rel in excluded:
+                  continue
+              manifest[rel] = {
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'size': path.stat().st_size,
+              }
+          (root / 'provenance_manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          PY
+          find paper_bundle -type f \
+            ! -name 'BUNDLE_SHA256SUMS.txt' \
+            ! -name 'FINAL_PROVENANCE_MANIFEST.json' \
+            -print0 | sort -z | xargs -0 sha256sum > /tmp/bundle.sha256
+          mv /tmp/bundle.sha256 paper_bundle/BUNDLE_SHA256SUMS.txt
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('paper_bundle')
+          manifest = {}
+          for path in sorted(p for p in root.rglob('*') if p.is_file()):
+              rel = path.relative_to(root).as_posix()
+              if rel == 'FINAL_PROVENANCE_MANIFEST.json':
+                  continue
+              manifest[rel] = {
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'size': path.stat().st_size,
+              }
+          (root / 'FINAL_PROVENANCE_MANIFEST.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          PY
 
       - name: Upload scientific audit paper bundle
         if: always()
