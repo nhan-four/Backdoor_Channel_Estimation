@@ -1,4 +1,4 @@
-run_id=2026-07-16-measured-trace-provenance-probe-v2
+run_id=2026-07-16-measured-trace-provenance-probe-v3
 purpose=download-checksum-and-structure-inventory-only
 paper_eligible=false
-fallback_policy=current-record-then-explicit-v4-record
+selected_probe=immutable-zenodo-v4-content-endpoint
