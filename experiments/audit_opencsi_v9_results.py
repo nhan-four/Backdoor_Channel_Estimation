@@ -126,7 +126,11 @@ def collect(a):
  (Path(a.output)/"OPENCSI_V9_SCIENTIFIC_AUDIT_REPORT.md").write_text("\n".join(lines)+"\n")
  lb=chr(92)*2
  tex=[r"\begin{table*}[t]",r"\centering",r"\caption{Claim-level audit of the frozen OpenCSI v9 measured-data matrix.}",r"\label{tab:opencsi_v9_audit}",r"\scriptsize",r"\begin{tabular}{lllrrl}",r"\toprule",r"Trigger & Estimator & Outcome & Mean & 95\% CI & Classification "+lb,r"\midrule"]
- for r in claims: tex.append(f"{r['trigger'].replace('_',r'\_')} & {r['architecture']} & {r['claim'].replace('_',r'\_')} & {r['mean']:.3e} & [{r['ci_low']:.3e},{r['ci_high']:.3e}] & {r['classification'].replace('_',r'\_')} "+lb)
+ for r in claims:
+  trigger_tex=r["trigger"].replace("_", "\\_")
+  claim_tex=r["claim"].replace("_", "\\_")
+  class_tex=r["classification"].replace("_", "\\_")
+  tex.append(f"{trigger_tex} & {r['architecture']} & {claim_tex} & {r['mean']:.3e} & [{r['ci_low']:.3e},{r['ci_high']:.3e}] & {class_tex} "+lb)
  tex += [r"\bottomrule",r"\end{tabular}",r"\end{table*}"]; (Path(a.output)/"opencsi_v9_scientific_audit_table.tex").write_text("\n".join(tex)+"\n")
  files=[p for p in Path(a.output).iterdir() if p.is_file()]; dump(Path(a.output)/"provenance_manifest.json",{p.name:{"sha256":h(p),"size":p.stat().st_size} for p in files}); print(json.dumps(audit,indent=2))
 
