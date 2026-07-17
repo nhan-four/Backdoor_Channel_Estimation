@@ -6,11 +6,21 @@ on:
       - agent/opencsi-drive-transfer
     paths:
       - .github/workflows/opencsi-drive-export.yml
+  pull_request:
+    branches:
+      - agent/opencsi-72run-gate-fix
+    paths:
+      - .github/workflows/opencsi-drive-export.yml
+      - tools/OpenCSI_Drive_Transfer.ipynb
   workflow_dispatch:
 
 permissions:
   contents: write
   actions: read
+
+concurrency:
+  group: opencsi-drive-transfer-assets
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -26,24 +36,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Prepare workspace
         run: |
           set -euo pipefail
-          mkdir -p payload artifacts frozen_runs
+          mkdir -p payload frozen_runs
 
       - name: Download and verify upstream OpenCSI raw archive
         run: |
           set -euo pipefail
           python - <<'PY'
-          import hashlib, json, os, pathlib, requests, sys, time
+          import hashlib, json, os, pathlib, requests, time
           article_id = 19596379
           expected_size = int(os.environ['RAW_SIZE'])
           expected_md5 = os.environ['RAW_MD5']
           expected_sha = os.environ['RAW_SHA256']
           out = pathlib.Path('openCSI.zip')
-          metadata = requests.get(f'https://api.figshare.com/v2/articles/{article_id}', timeout=60).json()
+          metadata_response = requests.get(f'https://api.figshare.com/v2/articles/{article_id}', timeout=60)
+          metadata_response.raise_for_status()
+          metadata = metadata_response.json()
           pathlib.Path('payload/figshare_article_metadata.json').write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding='utf-8')
           files = [f for f in metadata.get('files', []) if int(f.get('size', -1)) == expected_size]
           if len(files) != 1:
@@ -58,9 +70,13 @@ jobs:
                   for chunk in r.iter_content(8 * 1024 * 1024):
                       if not chunk:
                           continue
-                      fh.write(chunk); h_md5.update(chunk); h_sha.update(chunk); done += len(chunk)
+                      fh.write(chunk)
+                      h_md5.update(chunk)
+                      h_sha.update(chunk)
+                      done += len(chunk)
                       if time.time() - last > 30:
-                          print(f'downloaded {done}/{expected_size} bytes', flush=True); last = time.time()
+                          print(f'downloaded {done}/{expected_size} bytes', flush=True)
+                          last = time.time()
           if done != expected_size:
               raise SystemExit(f'Raw size mismatch: {done} != {expected_size}')
           if h_md5.hexdigest() != expected_md5:
@@ -70,6 +86,7 @@ jobs:
           print('Raw archive verified:', out, done, h_sha.hexdigest())
           PY
           split -b 500M -d -a 2 openCSI.zip payload/openCSI.zip.part-
+          test "$(cat payload/openCSI.zip.part-* | wc -c)" = "$RAW_SIZE"
 
       - name: Download frozen experiment artifacts
         run: |
@@ -79,6 +96,7 @@ jobs:
             echo "Downloading artifact ${id} -> ${name}"
             gh api -H 'Accept: application/vnd.github+json' "/repos/${REPO}/actions/artifacts/${id}/zip" > "${name}"
             test -s "${name}"
+            unzip -tq "${name}" >/dev/null
           }
           download_artifact 8377552692 payload/opencsi-compact-v8-measured.zip
           download_artifact 8383864419 frozen_runs/opencsi-full-v9-72run-collection.zip
@@ -97,11 +115,13 @@ jobs:
           download_artifact 8383297474 frozen_runs/opencsi-full-v9-source-preflight.zip
           download_artifact 8387166736 frozen_runs/opencsi-v9-scientific-audit-paper-bundle-corrected.zip
           (cd frozen_runs && zip -q ../payload/OPENCSI_FROZEN_RUNS_CHECKPOINTS.zip ./*.zip)
+          unzip -tq payload/OPENCSI_FROZEN_RUNS_CHECKPOINTS.zip >/dev/null
 
-      - name: Package repository source
+      - name: Package frozen repository source
         run: |
           set -euo pipefail
           git archive --format=zip --output=payload/OPENCSI_REPOSITORY_SOURCE_38a6580.zip 38a6580b727fb906e0682037f5fd9648262cdcaf
+          unzip -tq payload/OPENCSI_REPOSITORY_SOURCE_38a6580.zip >/dev/null
           cat > payload/README_TRANSFER.txt <<'EOF'
           OpenCSI server-to-server transfer package.
 
@@ -113,6 +133,7 @@ jobs:
 
           The raw archive is split into four release assets for reliable server-side transfer.
           Reconstruct in lexical order and verify the full SHA-256 before use.
+          Exact compact data, frozen checkpoints, audit outputs, and the frozen experiment source are included as separate assets.
           EOF
 
       - name: Build release manifest and checksums
@@ -149,6 +170,7 @@ jobs:
               'raw_parts': raw_parts,
               'package_assets': [info(root/name) for name in package_names],
               'checksums_file': 'SHA256SUMS.txt',
+              'frozen_experiment_head': '38a6580b727fb906e0682037f5fd9648262cdcaf',
           }
           (root/'release_manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')
           PY
@@ -163,8 +185,8 @@ jobs:
           else
             gh release create "$TAG" payload/* \
               --repo "$REPO" \
-              --target "${GITHUB_SHA}" \
+              --target "${{ github.event.pull_request.head.sha || github.sha }}" \
               --title 'OpenCSI full reproducibility transfer assets' \
-              --notes 'Server-to-server assets for copying the raw OpenCSI archive, exact compact dataset, frozen checkpoints, audit bundle, and frozen repository source into Google Drive.' \
+              --notes 'Server-to-server assets for copying the raw OpenCSI archive, exact compact dataset, frozen checkpoints, audit bundle, and frozen experiment source into Google Drive.' \
               --latest=false
           fi
