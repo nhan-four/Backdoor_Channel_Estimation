@@ -1,0 +1,33 @@
+name: WCL Drive Artifact Probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/wcl-drive-artifact-probe.yml'
+      - 'staging/wcl-drive-probe/**'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build probe
+        run: |
+          mkdir -p out
+          printf 'WCL Drive server-to-server probe\n' > out/drive_probe.txt
+          sha256sum out/drive_probe.txt > out/SHA256SUMS.txt
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wcl-drive-probe
+          path: out/
+          compression-level: 0
+          retention-days: 1
