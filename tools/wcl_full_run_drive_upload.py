@@ -16,6 +16,7 @@ EXPECTED_MD5 = "a9305ce0f582d6435ff4dd2fe890f3a9"
 # Destination created for this full run.
 TARGET_FOLDER_ID = "14oyYPdDJ3NDljj5TVK-gM8CbGnD7Lj7f"  # full_run_source_and_results
 CHECKSUMS_FOLDER_ID = "1FxxPxaUlq8ThJKO3dPsAMj040Mb_HRbn"
+PLACEHOLDER_FILE_ID = "1LJFUH-m_y5u6arQ_o0r8x66XaNjM2QOP"
 
 
 def hash_file(path: pathlib.Path, algorithm: str, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -52,21 +53,60 @@ def find_files(drive, parent_id: str, name: str):
     return response.get("files", [])
 
 
-def resumable_create_or_replace(drive, path: pathlib.Path, parent_id: str, mime_type: str):
+def run_resumable(request, label: str):
+    result = None
+    while result is None:
+        status, result = request.next_chunk(num_retries=10)
+        if status:
+            print(f"  {label}: {status.progress() * 100:.1f}%")
+    return result
+
+
+def replace_known_package(drive, path: pathlib.Path):
+    placeholder = drive.files().get(
+        fileId=PLACEHOLDER_FILE_ID,
+        fields="id,name,size,md5Checksum,webViewLink,parents,trashed",
+    ).execute()
+    if placeholder.get("trashed"):
+        raise RuntimeError("The registered Drive placeholder is in Trash")
+    if TARGET_FOLDER_ID not in placeholder.get("parents", []):
+        raise RuntimeError("The registered Drive placeholder is not in the expected folder")
+
+    media = MediaFileUpload(
+        str(path),
+        mimetype="application/zip",
+        resumable=True,
+        chunksize=32 * 1024 * 1024,
+    )
+    request = drive.files().update(
+        fileId=PLACEHOLDER_FILE_ID,
+        body={"name": EXPECTED_NAME},
+        media_body=media,
+        fields="id,name,size,md5Checksum,webViewLink,createdTime,modifiedTime,parents",
+    )
+    result = run_resumable(request, "Drive package upload")
+
+    # Remove any stale extra copies with the final name while retaining the
+    # registered stable file ID.
+    for duplicate in find_files(drive, TARGET_FOLDER_ID, EXPECTED_NAME):
+        if duplicate["id"] != PLACEHOLDER_FILE_ID:
+            drive.files().update(fileId=duplicate["id"], body={"trashed": True}).execute()
+    print("REPLACED", result.get("webViewLink", result["id"]))
+    return result
+
+
+def create_or_replace_sidecar(drive, path: pathlib.Path, parent_id: str, mime_type: str):
     media = MediaFileUpload(
         str(path),
         mimetype=mime_type,
         resumable=True,
-        chunksize=32 * 1024 * 1024,
+        chunksize=4 * 1024 * 1024,
     )
     existing = find_files(drive, parent_id, path.name)
-
     if existing:
-        # The first item is the placeholder created earlier; replace bytes in place
-        # so the Drive URL remains stable. Any extra same-name copies are trashed.
-        target = existing[0]
         request = drive.files().update(
-            fileId=target["id"],
+            fileId=existing[0]["id"],
+            body={"name": path.name},
             media_body=media,
             fields="id,name,size,md5Checksum,webViewLink,createdTime,modifiedTime",
         )
@@ -80,12 +120,7 @@ def resumable_create_or_replace(drive, path: pathlib.Path, parent_id: str, mime_
             fields="id,name,size,md5Checksum,webViewLink,createdTime,modifiedTime",
         )
         operation = "CREATED"
-
-    result = None
-    while result is None:
-        status, result = request.next_chunk(num_retries=10)
-        if status:
-            print(f"  Drive upload: {status.progress() * 100:.1f}%")
+    result = run_resumable(request, f"Drive {path.name}")
     print(operation, result.get("webViewLink", result["id"]))
     return result
 
@@ -103,6 +138,7 @@ def write_sidecars(local_info: dict):
                 "expected_detection_rows": 288,
                 "expected_repair_rows": 72,
                 "expected_receiver_raw_rows": 2016,
+                "drive_file_id": PLACEHOLDER_FILE_ID,
                 "target_folder_id": TARGET_FOLDER_ID,
                 "transfer_method": "user-authorized_colab_resumable_upload",
                 "generated_unix_time": int(time.time()),
@@ -123,38 +159,40 @@ print()
 print(f"Select exactly: {EXPECTED_NAME}")
 uploaded = files.upload()
 if EXPECTED_NAME not in uploaded:
-    raise RuntimeError(
-        f"Required file not selected. Uploaded names: {sorted(uploaded)}"
-    )
+    raise RuntimeError(f"Required file not selected. Uploaded names: {sorted(uploaded)}")
 
 package_path = pathlib.Path(EXPECTED_NAME)
 local_info = verify_local(package_path)
 print("LOCAL VERIFICATION PASSED")
 print(json.dumps(local_info, indent=2))
 
-remote = resumable_create_or_replace(
-    drive, package_path, TARGET_FOLDER_ID, "application/zip"
-)
+remote = replace_known_package(drive, package_path)
+if remote["id"] != PLACEHOLDER_FILE_ID:
+    raise RuntimeError("Drive package file ID changed unexpectedly")
 if int(remote.get("size", -1)) != EXPECTED_SIZE:
     raise RuntimeError(f"Drive size mismatch: {remote.get('size')} != {EXPECTED_SIZE}")
 if remote.get("md5Checksum", "").lower() != EXPECTED_MD5:
-    raise RuntimeError(
-        f"Drive MD5 mismatch: {remote.get('md5Checksum')} != {EXPECTED_MD5}"
-    )
+    raise RuntimeError(f"Drive MD5 mismatch: {remote.get('md5Checksum')} != {EXPECTED_MD5}")
 
 checksum_path, manifest_path = write_sidecars(local_info)
 for sidecar in (checksum_path, manifest_path):
-    parent = CHECKSUMS_FOLDER_ID
     mime = "application/json" if sidecar.suffix == ".json" else "text/plain"
-    result = resumable_create_or_replace(drive, sidecar, parent, mime)
+    result = create_or_replace_sidecar(drive, sidecar, CHECKSUMS_FOLDER_ID, mime)
     if int(result.get("size", -1)) != sidecar.stat().st_size:
         raise RuntimeError(f"Drive sidecar size mismatch for {sidecar.name}")
 
 # Final independent metadata readback.
 final_meta = drive.files().get(
-    fileId=remote["id"],
+    fileId=PLACEHOLDER_FILE_ID,
     fields="id,name,size,md5Checksum,webViewLink,parents,modifiedTime",
 ).execute()
+if final_meta.get("name") != EXPECTED_NAME:
+    raise RuntimeError("Final Drive filename mismatch")
+if int(final_meta.get("size", -1)) != EXPECTED_SIZE:
+    raise RuntimeError("Final Drive size mismatch")
+if final_meta.get("md5Checksum", "").lower() != EXPECTED_MD5:
+    raise RuntimeError("Final Drive MD5 mismatch")
+
 print()
 print("TRANSFER FINISHED")
 print(json.dumps(final_meta, indent=2))
