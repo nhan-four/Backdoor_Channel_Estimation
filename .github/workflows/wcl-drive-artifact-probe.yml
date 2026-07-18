@@ -1,11 +1,12 @@
-name: WCL Drive Artifact Probe
+name: WCL Drive Uploader Validation
 
 on:
   pull_request:
     branches: [main]
     paths:
       - '.github/workflows/wcl-drive-artifact-probe.yml'
-      - 'staging/wcl-drive-probe/**'
+      - 'tools/wcl_full_run_drive_upload.py'
+      - 'tools/WCL_Full_Run_Drive_Upload.ipynb'
 
 permissions:
   contents: read
@@ -15,19 +16,27 @@ defaults:
     shell: bash
 
 jobs:
-  package:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build probe
+      - name: Validate uploader source and notebook
         run: |
-          mkdir -p out
-          printf 'WCL Drive server-to-server probe\n' > out/drive_probe.txt
-          sha256sum out/drive_probe.txt > out/SHA256SUMS.txt
-      - name: Upload probe artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wcl-drive-probe
-          path: out/
-          compression-level: 0
-          retention-days: 1
+          python -m py_compile tools/wcl_full_run_drive_upload.py
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+
+          script = Path('tools/wcl_full_run_drive_upload.py')
+          notebook = Path('tools/WCL_Full_Run_Drive_Upload.ipynb')
+          source = script.read_text(encoding='utf-8')
+          ast.parse(source)
+          nb = json.loads(notebook.read_text(encoding='utf-8'))
+          assert nb['nbformat'] == 4
+          assert len(nb['cells']) == 2
+          assert 'ee64b6ee9348e31015177fcd767b035757c27b9bf6c9f22b8607704b26701ee4' in source
+          assert '155_612_278' in source
+          assert '1LJFUH-m_y5u6arQ_o0r8x66XaNjM2QOP' in source
+          print('WCL uploader validation passed')
+          PY
