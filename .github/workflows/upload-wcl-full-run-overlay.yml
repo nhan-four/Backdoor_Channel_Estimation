@@ -1,0 +1,98 @@
+name: Upload WCL full-run overlay to Google Drive
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA256: 552ed09b700725febf429c2b975e9f3fdf9151ac7ea3d0123ded33f1f6e6a731
+      EXPECTED_SIZE: '1739970'
+      DRIVE_ROOT_FOLDER_ID: 14oyYPdDJ3NDljj5TVK-gM8CbGnD7Lj7f
+      PAYLOAD_NAME: WCL_EXTENSION_OVERLAY_20260718.zip
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          parts=(tools/wcl_full_run_overlay/${PAYLOAD_NAME}.b64.part-*)
+          if [ "${#parts[@]}" -ne 3 ]; then
+            echo "Expected exactly 3 payload parts, found ${#parts[@]}" >&2
+            printf '%s\n' "${parts[@]}" >&2
+            exit 1
+          fi
+          cat "${parts[@]}" | base64 --decode > "/tmp/${PAYLOAD_NAME}"
+          actual_size="$(stat -c '%s' "/tmp/${PAYLOAD_NAME}")"
+          actual_sha="$(sha256sum "/tmp/${PAYLOAD_NAME}" | awk '{print $1}')"
+          test "${actual_size}" = "${EXPECTED_SIZE}"
+          test "${actual_sha}" = "${EXPECTED_SHA256}"
+          unzip -t "/tmp/${PAYLOAD_NAME}"
+          printf '%s  %s\n' "${actual_sha}" "${PAYLOAD_NAME}" > "/tmp/${PAYLOAD_NAME}.sha256"
+          mkdir -p /tmp/wcl_overlay
+          unzip -q "/tmp/${PAYLOAD_NAME}" -d /tmp/wcl_overlay
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone
+
+      - name: Configure Google Drive service account
+        shell: bash
+        env:
+          GDRIVE_SERVICE_ACCOUNT_B64: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "${GDRIVE_SERVICE_ACCOUNT_B64}"
+          printf '%s' "${GDRIVE_SERVICE_ACCOUNT_B64}" | base64 --decode > /tmp/gdrive-service-account.json
+          python -m json.tool /tmp/gdrive-service-account.json >/dev/null
+          cat > /tmp/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive
+          service_account_file = /tmp/gdrive-service-account.json
+          root_folder_id = ${DRIVE_ROOT_FOLDER_ID}
+          EOF
+          chmod 600 /tmp/gdrive-service-account.json /tmp/rclone.conf
+
+      - name: Upload ZIP, checksum, and extracted source/results
+        shell: bash
+        run: |
+          set -euo pipefail
+          rclone copyto "/tmp/${PAYLOAD_NAME}" "gdrive:${PAYLOAD_NAME}" --config /tmp/rclone.conf --drive-chunk-size 64M --checkers 4 --transfers 2
+          rclone copyto "/tmp/${PAYLOAD_NAME}.sha256" "gdrive:${PAYLOAD_NAME}.sha256" --config /tmp/rclone.conf
+          rclone copy /tmp/wcl_overlay "gdrive:WCL_EXTENSION_OVERLAY_20260718" --config /tmp/rclone.conf --drive-chunk-size 64M --checkers 8 --transfers 4
+
+      - name: Verify Google Drive upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_size="$(rclone size "gdrive:${PAYLOAD_NAME}" --config /tmp/rclone.conf --json | python -c 'import json,sys; print(json.load(sys.stdin)["bytes"])')"
+          test "${remote_size}" = "${EXPECTED_SIZE}"
+          rclone check "/tmp/${PAYLOAD_NAME}" "gdrive:${PAYLOAD_NAME}" --config /tmp/rclone.conf --one-way --size-only
+          extracted_count="$(rclone lsf "gdrive:WCL_EXTENSION_OVERLAY_20260718" --config /tmp/rclone.conf -R --files-only | wc -l | tr -d ' ')"
+          test "${extracted_count}" -gt 0
+          {
+            echo "UPLOAD_COMPLETE=true"
+            echo "PAYLOAD=${PAYLOAD_NAME}"
+            echo "SIZE=${EXPECTED_SIZE}"
+            echo "SHA256=${EXPECTED_SHA256}"
+            echo "EXTRACTED_FILE_COUNT=${extracted_count}"
+            date -u '+UTC=%Y-%m-%dT%H:%M:%SZ'
+          } | tee /tmp/DRIVE_UPLOAD_COMPLETE.txt
+          rclone copyto /tmp/DRIVE_UPLOAD_COMPLETE.txt "gdrive:DRIVE_UPLOAD_COMPLETE.txt" --config /tmp/rclone.conf
+
+      - name: Remove credentials
+        if: always()
+        shell: bash
+        run: rm -f /tmp/gdrive-service-account.json /tmp/rclone.conf
