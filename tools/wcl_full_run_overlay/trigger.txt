@@ -1,0 +1,3 @@
+trigger_utc=2026-07-19T00:00:00Z
+payload=WCL_EXTENSION_OVERLAY_20260718.zip
+expected_sha256=552ed09b700725febf429c2b975e9f3fdf9151ac7ea3d0123ded33f1f6e6a731
