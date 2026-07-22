@@ -1,0 +1,278 @@
+name: OpenCSI v9 scientific audit
+
+on:
+  pull_request:
+    paths:
+      - ".github/opencsi-v9-scientific-audit.trigger"
+      - ".github/workflows/opencsi-v9-scientific-audit.yml"
+      - "experiments/audit_opencsi_v9_results.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: "29517514316"
+  SOURCE_COLLECTION_ARTIFACT: "opencsi-full-v9-72run-collection"
+  DATASET_RUN_ID: "29503567022"
+  DATASET_ARTIFACT: "opencsi-compact-v8-measured"
+  SOURCE_SHA256: "258e7ed1f0dc38bc22f31bc6cbddc94bb55140b8885929df9bc89a2dd130f44e"
+  DATASET_SHA256: "74521a00be868ba3bd92a5540536fa8600eb770d5459bd7c0191800001031f50"
+  DATASET_MANIFEST_SHA256: "6bda855635ee52ffa12b025f4b3e62689ee0abf546c707e2a32f6295f867ed3b"
+  FULL_RESULTS_SHA256: "0b74e82c65035fcecd538d1b44fd0f62152b3638e4babcb6023c7668687cb2a4"
+  AUDIT_SCRIPT_SHA256: "fb7214ef88e86a70c139b05722734e80b5b1d8ee5412a9311030d72735e3e7d2"
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pinned audit dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.3.5 pandas==2.2.3 scipy==1.17.0
+          python -m pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Freeze and verify audit source
+        run: |
+          set -euo pipefail
+          python experiments/apply_opencsi_v9_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          python -m py_compile experiments/audit_opencsi_v9_results.py
+          printf '%s  %s\n' "$SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
+          printf '%s  %s\n' "$AUDIT_SCRIPT_SHA256" experiments/audit_opencsi_v9_results.py | sha256sum --check --strict
+          python - <<'PY'
+          import numpy, pandas, scipy, torch
+          assert numpy.__version__ == '2.3.5'
+          assert pandas.__version__ == '2.2.3'
+          assert scipy.__version__ == '1.17.0'
+          assert torch.__version__ == '2.13.0+cpu'
+          print({'numpy': numpy.__version__, 'pandas': pandas.__version__, 'scipy': scipy.__version__, 'torch': torch.__version__})
+          PY
+          python -m pip freeze | sort > audit_requirements_frozen.txt
+          sha256sum experiments/opencsi_measured_backdoor.py experiments/audit_opencsi_v9_results.py audit_requirements_frozen.txt > audit_source.sha256
+
+      - name: Upload frozen audit source
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-v9-scientific-audit-source
+          path: |
+            experiments/opencsi_measured_backdoor.py
+            experiments/apply_opencsi_v9_hotfix.py
+            experiments/audit_opencsi_v9_results.py
+            tests/test_opencsi_measured_backdoor.py
+            audit_requirements_frozen.txt
+            audit_source.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  evaluate:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        fold: [0, 1, 2, 3]
+        seed: [42, 43, 44]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pinned audit dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.3.5 pandas==2.2.3 scipy==1.17.0
+          python -m pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Freeze and verify audit source
+        run: |
+          set -euo pipefail
+          python experiments/apply_opencsi_v9_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          python -m py_compile experiments/audit_opencsi_v9_results.py
+          printf '%s  %s\n' "$SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
+          printf '%s  %s\n' "$AUDIT_SCRIPT_SHA256" experiments/audit_opencsi_v9_results.py | sha256sum --check --strict
+
+      - name: Download checksum-pinned compact measured dataset
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.DATASET_ARTIFACT }}
+          path: dataset_input
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.DATASET_RUN_ID }}
+
+      - name: Download frozen fold-seed checkpoints
+        uses: actions/download-artifact@v8
+        with:
+          name: opencsi-full-v9-fold${{ matrix.fold }}-seed${{ matrix.seed }}
+          path: run_input
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Verify dataset files
+        run: |
+          set -euo pipefail
+          DATASET=dataset_input/measured_smoke/data/opencsi_compact_v8.npz
+          MANIFEST=dataset_input/measured_smoke/data/opencsi_compact_v8.manifest.json
+          printf '%s  %s\n' "$DATASET_SHA256" "$DATASET" | sha256sum --check --strict
+          printf '%s  %s\n' "$DATASET_MANIFEST_SHA256" "$MANIFEST" | sha256sum --check --strict
+
+      - name: Re-evaluate frozen checkpoints
+        run: |
+          set -euo pipefail
+          python experiments/audit_opencsi_v9_results.py evaluate \
+            --source experiments/opencsi_measured_backdoor.py \
+            --dataset dataset_input/measured_smoke/data/opencsi_compact_v8.npz \
+            --run-root run_input \
+            --fold ${{ matrix.fold }} \
+            --seed ${{ matrix.seed }} \
+            --output posthoc/fold${{ matrix.fold }}_seed${{ matrix.seed }} \
+            --batch 4096 \
+            --tol 5e-6
+
+      - name: Upload fold-seed posthoc audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-v9-posthoc-fold${{ matrix.fold }}-seed${{ matrix.seed }}
+          path: posthoc/fold${{ matrix.fold }}_seed${{ matrix.seed }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+  collect:
+    needs: evaluate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pinned audit dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==2.3.5 pandas==2.2.3 scipy==1.17.0
+          python -m pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Freeze and verify audit source
+        run: |
+          set -euo pipefail
+          python experiments/apply_opencsi_v9_hotfix.py
+          python -m py_compile experiments/opencsi_measured_backdoor.py
+          python -m py_compile experiments/audit_opencsi_v9_results.py
+          printf '%s  %s\n' "$SOURCE_SHA256" experiments/opencsi_measured_backdoor.py | sha256sum --check --strict
+          printf '%s  %s\n' "$AUDIT_SCRIPT_SHA256" experiments/audit_opencsi_v9_results.py | sha256sum --check --strict
+          python -m pip freeze | sort > audit_requirements_frozen.txt
+
+      - name: Download frozen v9 collection
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.SOURCE_COLLECTION_ARTIFACT }}
+          path: source_collection
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Verify frozen collection
+        run: |
+          set -euo pipefail
+          FULL=source_collection/collected/opencsi_measured_full_results.csv
+          printf '%s  %s\n' "$FULL_RESULTS_SHA256" "$FULL" | sha256sum --check --strict
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          audit = json.loads(Path('source_collection/collected/audit.json').read_text(encoding='utf-8'))
+          status = json.loads(Path('source_collection/collected/full_matrix_status.json').read_text(encoding='utf-8'))
+          assert audit['paper_eligible'] is True
+          assert audit['observed_rows'] == 72
+          assert status['paper_eligible'] is True
+          print({'source_collection_gate': 'pass'})
+          PY
+
+      - name: Download all fold-seed posthoc audits
+        id: download_posthoc
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: opencsi-v9-posthoc-fold*-seed*
+          path: posthoc_input
+          merge-multiple: false
+
+      - name: Collect scientific audit and claim gates
+        id: scientific_audit
+        shell: bash
+        run: |
+          set +e
+          mkdir -p paper_bundle
+          python experiments/audit_opencsi_v9_results.py collect \
+            --input posthoc_input \
+            --full source_collection/collected/opencsi_measured_full_results.csv \
+            --output paper_bundle \
+            --seed 20260716 \
+            --draws 20000 2>&1 | tee paper_bundle/scientific_audit.log
+          rc=${PIPESTATUS[0]}
+          python - <<PY
+          import json
+          from pathlib import Path
+          payload = {
+              'workflow': 'OpenCSI v9 scientific audit',
+              'source_run_id': 29517514316,
+              'evaluate_job_result': '${{ needs.evaluate.result }}',
+              'download_posthoc_outcome': '${{ steps.download_posthoc.outcome }}',
+              'audit_exit_code': int('$rc'),
+              'scientific_audit_complete': int('$rc') == 0 and '${{ needs.evaluate.result }}' == 'success',
+              'manuscript_metrics_auto_inserted': False,
+          }
+          Path('paper_bundle/scientific_audit_status.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
+          exit "$rc"
+
+      - name: Assemble reproducible paper-source bundle
+        if: always()
+        run: |
+          mkdir -p paper_bundle/src paper_bundle/frozen_v9_collection
+          cp experiments/audit_opencsi_v9_results.py paper_bundle/src/
+          cp experiments/opencsi_measured_backdoor.py paper_bundle/src/
+          cp experiments/apply_opencsi_v9_hotfix.py paper_bundle/src/
+          cp tests/test_opencsi_measured_backdoor.py paper_bundle/src/
+          cp audit_requirements_frozen.txt paper_bundle/src/
+          cp source_collection/collected/audit.json paper_bundle/frozen_v9_collection/
+          cp source_collection/collected/full_matrix_status.json paper_bundle/frozen_v9_collection/
+          cp source_collection/collected/opencsi_measured_full_results.csv paper_bundle/frozen_v9_collection/
+          cp source_collection/collected/opencsi_measured_grouped_results.csv paper_bundle/frozen_v9_collection/
+          cp source_collection/collected/opencsi_measured_table.tex paper_bundle/frozen_v9_collection/
+          find paper_bundle -type f -print0 | sort -z | xargs -0 sha256sum > paper_bundle/BUNDLE_SHA256SUMS.txt
+
+      - name: Upload scientific audit paper bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencsi-v9-scientific-audit-paper-bundle
+          path: paper_bundle/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9

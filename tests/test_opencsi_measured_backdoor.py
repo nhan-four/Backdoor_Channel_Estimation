@@ -68,3 +68,80 @@ def test_paired_bootstrap_finite():
     lo, hi = mod.paired_fingerprint_bootstrap(clean, trig, fp, seed=1, draws=200)
     assert 1.24 < lo < 1.26
     assert 1.24 < hi < 1.26
+
+
+def test_collector_keeps_attack_selection_failure_as_observed_result(tmp_path):
+    import csv
+    import json
+    from types import SimpleNamespace
+
+    input_root = tmp_path / "matrix"
+    output = tmp_path / "collected"
+    fields = [
+        "fold",
+        "seed",
+        "architecture",
+        "trigger",
+        "status",
+        "attack_selection_status",
+        "attack_checkpoint_selected",
+        "clean_model_clean_mse",
+        "clean_model_triggered_mse",
+        "backdoor_model_clean_mse",
+        "backdoor_model_triggered_mse",
+        "backdoor_degradation_ratio",
+        "difference_in_differences_mse",
+        "backdoor_model_clean_nmse_db",
+        "backdoor_model_triggered_nmse_db",
+        "trigger_input_evm_db",
+    ]
+    for fold in range(4):
+        for seed in mod.DEFAULT_SEEDS:
+            run_dir = input_root / f"fold{fold}_seed{seed}"
+            run_dir.mkdir(parents=True)
+            rows = []
+            for architecture in mod.ARCHITECTURES:
+                for trigger in mod.DEFAULT_TRIGGERS:
+                    selected = not (
+                        fold == 0
+                        and seed == 43
+                        and architecture == "direct"
+                        and trigger == "phase_band"
+                    )
+                    rows.append(
+                        {
+                            "fold": fold,
+                            "seed": seed,
+                            "architecture": architecture,
+                            "trigger": trigger,
+                            "status": "ok",
+                            "attack_selection_status": (
+                                "ok"
+                                if selected
+                                else "no_attack_checkpoint_within_clean_budget"
+                            ),
+                            "attack_checkpoint_selected": selected,
+                            "clean_model_clean_mse": 1.0,
+                            "clean_model_triggered_mse": 1.1,
+                            "backdoor_model_clean_mse": 1.0,
+                            "backdoor_model_triggered_mse": 1.2,
+                            "backdoor_degradation_ratio": 1.2,
+                            "difference_in_differences_mse": 0.1,
+                            "backdoor_model_clean_nmse_db": -1.0,
+                            "backdoor_model_triggered_nmse_db": 0.0,
+                            "trigger_input_evm_db": -20.0,
+                        }
+                    )
+            with (run_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+
+    mod.collect_results(SimpleNamespace(input_root=str(input_root), output=str(output)))
+    audit = json.loads((output / "audit.json").read_text(encoding="utf-8"))
+    assert audit["observed_rows"] == 72
+    assert audit["all_row_status_ok"] is True
+    assert audit["attack_selection_schema_valid"] is True
+    assert audit["attack_checkpoint_selected_count"] == 71
+    assert audit["attack_checkpoint_not_selected_count"] == 1
+    assert audit["paper_eligible"] is True
